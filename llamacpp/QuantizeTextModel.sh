@@ -41,7 +41,7 @@ IMATRIX_GENERATED=1
 if [ -s "$TMP_TRAINING" ]; then
     if [ ! -f "$IMATRIX_FILE" ]; then
         echo "Non-empty training data found, generating imatrix..."
-        ./build/bin/llama-imatrix -m "$MODEL_FILE" -f "$TMP_TRAINING" -o "$IMATRIX_FILE"
+        ./bin/llama-imatrix -m "$MODEL_FILE" -f "$TMP_TRAINING" -o "$IMATRIX_FILE"
     else
         echo "imatrix.dat already exists, skipping imatrix generation."
     fi
@@ -58,10 +58,10 @@ for QUANT_TYPE in "$@"; do
 
     if [ "$IMATRIX_GENERATED" -eq 0 ]; then
         echo "Quantizing with imatrix for type '$QUANT_TYPE'..."
-        ./build/bin/llama-quantize --imatrix "$IMATRIX_FILE" "$MODEL_FILE" "$QUANT_FILE" "$QUANT_TYPE"
+        ./bin/llama-quantize --imatrix "$IMATRIX_FILE" "$MODEL_FILE" "$QUANT_FILE" "$QUANT_TYPE"
     else
         echo "Quantizing directly (no training data) for type '$QUANT_TYPE'..."
-        ./build/bin/llama-quantize "$MODEL_FILE" "$QUANT_FILE" "$QUANT_TYPE"
+        ./bin/llama-quantize "$MODEL_FILE" "$QUANT_FILE" "$QUANT_TYPE"
     fi
 done
 

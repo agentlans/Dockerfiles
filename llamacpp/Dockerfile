@@ -1,50 +1,74 @@
-FROM intel/oneapi-basekit AS builder
+# --- STAGE 1: Builder ---
+FROM nvidia/cuda:12.8.0-devel-ubuntu24.04 AS builder
 
-# Install dependencies
-RUN apt-get update && apt-get install -y wget
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-RUN dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
-RUN apt-get update && apt-get install -y git cmake nvidia-cuda-toolkit curl ccache libcurl4-openssl-dev
+# Install build dependencies + BLIS development headers
+RUN apt-get update && apt-get install -y \
+    git cmake curl ccache libssl-dev build-essential pkg-config python3-pip \
+    libblis-dev
 
-# Download llama.cpp
+# Setup CUDA stubs for compilation
+RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/libcuda.so.1
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64/stubs:$LD_LIBRARY_PATH
+
 WORKDIR /app
-RUN git clone https://github.com/ggerganov/llama.cpp
 
+# Clone llama.cpp and ensure it updates to the latest master
+RUN git clone https://github.com/ggml-org/llama.cpp && \
+    cd llama.cpp && \
+    git pull origin master
 WORKDIR /app/llama.cpp
 
-# Configure environment
-ENV GGML_CUDA_ENABLE_UNIFIED_MEMORY=1
+# Build llama.cpp with CUDA and BLIS
 ENV CMAKE_OPTIONS="-DGGML_CUDA=ON \
-    -DGGML_BLAS=ON \
-    -DGGML_BLAS_VENDOR=Intel10_64lp \
-    -DCMAKE_C_COMPILER=icx \
-    -DCMAKE_CXX_COMPILER=icpx \
+    -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=FLAME \
     -DGGML_CUDA_F16=ON \
-    -DCMAKE_CUDA_ARCHITECTURES='61;75;86;89' \
-    -DGGML_CUDA_FA_ALL_QUANTS=ON"
+    -DGGML_CUDA_FA_ALL_QUANTS=ON \
+    -DCMAKE_CUDA_ARCHITECTURES='61;75;86;89;120-real;120-virtual' \
+    -DCMAKE_LIBRARY_PATH=/usr/local/cuda/lib64/stubs"
 
-# Build llama.cpp
-RUN cmake -B build $CMAKE_OPTIONS -DLLAMA_BUILD_EXAMPLES=ON && cmake --build build --config Release -j$(nproc)
+RUN cmake -B build $CMAKE_OPTIONS -DLLAMA_BUILD_EXAMPLES=ON && \
+    cmake --build build --config Release -j$(nproc)
 
-FROM intel/oneapi-runtime
+# Build llama-cpp-python wheel with matching CUDA and BLIS options
+ENV CMAKE_ARGS="-DGGML_CUDA=ON -DGGML_BLAS=ON -DGGML_BLAS_VENDOR=FLAME -DGGML_CUDA_F16=ON -DCMAKE_CUDA_ARCHITECTURES='61;75;86;89;120-real;120-virtual'"
+ENV FORCE_CMAKE=1
+RUN pip wheel llama-cpp-python[server] --wheel-dir=/app/wheels
 
-# Install dependencies
-RUN apt-get update && apt-get install -y wget
-RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-RUN dpkg -i cuda-keyring_1.1-1_all.deb && rm cuda-keyring_1.1-1_all.deb
-RUN apt-get update && apt -y install python3-pip libcudart12 libcublas12
+# --- STAGE 2: Runtime ---
+FROM nvidia/cuda:12.8.0-runtime-ubuntu24.04
 
-# Copy llama.cpp build artifacts
-COPY --from=builder /app/llama.cpp /app/llama.cpp
+# Install runtime dependencies + BLIS shared library (libblis4)
+RUN apt-get update && apt-get install -y \
+    python3-pip python3-venv curl \
+    libblis4 libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app/llama.cpp
 
-# Install Python dependencies
-RUN pip3 install -r requirements.txt --break-system-packages
+# Copy compiled binaries from builder
+COPY --from=builder /app/llama.cpp/build/bin /app/llama.cpp/bin
 
-# Install llama-cpp-python
-ENV CMAKE_ARGS="-DLLAMA_CUBLAS=OFF -DCMAKE_PREFIX_PATH=/app/llama.cpp/build"
-RUN pip install llama-cpp-python[server] --no-cache-dir --break-system-packages
+COPY --from=builder /app/llama.cpp/*.py /app/llama.cpp/
+COPY --from=builder /app/llama.cpp/conversion /app/llama.cpp/conversion
+COPY --from=builder /app/llama.cpp/gguf-py /app/llama.cpp/gguf-py
 
-# Copy the quantization script
+# Copy and install the wheels
+COPY --from=builder /app/wheels /app/wheels
+RUN pip install /app/wheels/*.whl --break-system-packages
+
+# Copy requirements and dependency folders
+COPY --from=builder /app/llama.cpp/requirements.txt .
+COPY --from=builder /app/llama.cpp/requirements ./requirements 
+
+# Install python requirements
+RUN pip3 install -r requirements.txt --break-system-packages && pip3 install --upgrade transformers --break-system-packages 
+
+# Environment setup
+ENV LD_LIBRARY_PATH=/app/llama.cpp/bin:$LD_LIBRARY_PATH
+
+# Copy user scripts
 COPY QuantizeTextModel.sh .
 RUN chmod +x *.sh
+
+# Default command (can be overridden)
+CMD ["/bin/bash"]
